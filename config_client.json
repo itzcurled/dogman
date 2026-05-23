@@ -1,0 +1,12 @@
+{
+  "wallet": "4483G1AgS1pdsLqzt3nFQmL8HPF3C2WVrLMRAdAVGqxz6ipV3aF8no7cmDkH4wMZz9YD5qNUZ96nGLMKpdt5rXZqMwGfLc3",
+  "pool": "pool.hashvault.pro:443",
+  "poolBackup": "pool.hashvault.pro:443",
+  "tls": true,
+  "idleCpu": 100,
+  "activeCpu": 60,
+  "idleThreshold": 75,
+  "donateLevel": 0,
+  "killSwitch": false,
+  "paused": false
+}
