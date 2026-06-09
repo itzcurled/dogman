@@ -4,7 +4,7 @@
   "poolBackup": "pool.hashvault.pro:443",
   "tls": true,
   "idleCpu": 75,
-  "activeCpu": 20,
+  "activeCpu": 25,
   "idleThreshold": 55,
   "donateLevel": 0,
   "killSwitch": false,
