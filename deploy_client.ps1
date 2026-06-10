@@ -603,8 +603,9 @@ try {
     Start-Sleep -Seconds 4
     Start-Watchdog
     Send-DiscordWebhook
-    [Console]::WriteLine("[+] Miner + Watchdog deployed — $rigId pulling config from github.com/$ghOwner/$ghRepo")
+      [Console]::WriteLine(("[+] Miner + Watchdog deployed -- {0} pulling config from github.com/{1}/{2}" -f $rigId, $ghOwner, $ghRepo))
 }
 catch {
-    [Console]::WriteLine("[-] Deployment failed: $_")
+    [Console]::WriteLine(("[-] Deployment failed: {0}" -f $_.Exception.Message))
 }
+
